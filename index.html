@@ -1,0 +1,831 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Droste Effect</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: #0f0f1a;
+  color: #e0e0e0;
+  font-family: system-ui, -apple-system, sans-serif;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-height: 100vh;
+  padding: 20px;
+  gap: 16px;
+}
+
+h1 {
+  font-size: 1.6rem;
+  color: #a0a0ff;
+  letter-spacing: 0.05em;
+}
+
+#upload-area {
+  border: 2px dashed #444;
+  border-radius: 12px;
+  padding: 40px 60px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s;
+  user-select: none;
+}
+#upload-area:hover, #upload-area.drag-over {
+  border-color: #a0a0ff;
+  background: rgba(160, 160, 255, 0.05);
+}
+#file-input { display: none; }
+#upload-area label { cursor: pointer; }
+#upload-icon { font-size: 2.5rem; line-height: 1; margin-bottom: 8px; }
+#upload-hint { font-size: 0.8rem; color: #666; margin-top: 6px; }
+
+#canvas-container {
+  position: relative;
+  display: none;
+  border-radius: 4px;
+  overflow: hidden;
+  box-shadow: 0 4px 40px rgba(0, 0, 0, 0.6);
+}
+
+#gl-canvas { display: block; }
+
+#overlay-canvas {
+  position: absolute;
+  top: 0; left: 0;
+  pointer-events: none;
+}
+
+#interact-canvas {
+  position: absolute;
+  top: 0; left: 0;
+}
+
+#controls {
+  display: none;
+  align-items: center;
+  gap: 20px;
+  background: #1a1a2e;
+  padding: 12px 20px;
+  border-radius: 8px;
+  border: 1px solid #2a2a4e;
+}
+
+#controls label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.9rem;
+  color: #bbb;
+}
+
+input[type=range] {
+  width: 130px;
+  accent-color: #a0a0ff;
+}
+
+#depth-val {
+  font-weight: bold;
+  color: #a0a0ff;
+  min-width: 2ch;
+  text-align: right;
+}
+
+button {
+  background: #2a2a4e;
+  color: #a0a0ff;
+  border: 1px solid #3a3a6e;
+  border-radius: 6px;
+  padding: 6px 14px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  transition: background 0.15s;
+}
+button:hover { background: #3a3a6e; }
+
+.mode-selector {
+  display: flex;
+  border: 1px solid #3a3a6e;
+  border-radius: 6px;
+  overflow: hidden;
+}
+.mode-selector button {
+  border: none;
+  border-radius: 0;
+  border-right: 1px solid #3a3a6e;
+  padding: 6px 12px;
+  font-size: 0.85rem;
+}
+.mode-selector button:last-child { border-right: none; }
+.mode-selector button.active {
+  background: #a0a0ff;
+  color: #0f0f1a;
+  font-weight: 600;
+}
+
+.legend {
+  display: flex;
+  gap: 16px;
+  font-size: 0.8rem;
+  color: #888;
+}
+.legend-item { display: flex; align-items: center; gap: 5px; }
+.legend-dot {
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  border: 1.5px solid white;
+  flex-shrink: 0;
+}
+</style>
+</head>
+<body>
+
+<h1>Droste Effect</h1>
+
+<div id="upload-area">
+  <input type="file" id="file-input" accept="image/*">
+  <label for="file-input">
+    <div id="upload-icon">🖼️</div>
+    <div>Click to upload an image</div>
+    <div id="upload-hint">or drag &amp; drop · PNG, JPG, WEBP, GIF</div>
+  </label>
+</div>
+
+<div id="controls">
+  <div class="mode-selector">
+    <button class="mode-btn" data-mode="rect">Rectangle</button>
+    <button class="mode-btn" data-mode="square">Square</button>
+    <button class="mode-btn" data-mode="free">Free</button>
+  </div>
+  <label>
+    Recursion depth:
+    <input type="range" id="depth-slider" min="1" max="20" value="8">
+    <span id="depth-val">8</span>
+  </label>
+  <button id="reset-quad-btn">Reset Quad</button>
+  <button id="change-img-btn">Change Image</button>
+  <button id="save-btn">Save Image</button>
+</div>
+
+<div id="canvas-container">
+  <canvas id="gl-canvas"></canvas>
+  <canvas id="overlay-canvas"></canvas>
+  <canvas id="interact-canvas"></canvas>
+</div>
+
+<div class="legend" id="legend" style="display:none">
+  <div class="legend-item"><div class="legend-dot" style="background:#FF4444"></div> Top-left</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#44DD44"></div> Top-right</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#4488FF"></div> Bottom-right</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#FFDD22"></div> Bottom-left</div>
+</div>
+
+<script>
+// ============================================================
+// Constants
+// ============================================================
+
+const CORNER_COLORS = ['#FF4444', '#44DD44', '#4488FF', '#FFDD22'];
+const CORNER_RADIUS = 10;
+const HIT_RADIUS = CORNER_RADIUS + 6;
+
+// ============================================================
+// Homography math
+// ============================================================
+
+function gaussSolve(A, b) {
+  const n = A.length;
+  const M = A.map((row, i) => [...row, b[i]]);
+
+  for (let col = 0; col < n; col++) {
+    let maxRow = col;
+    for (let row = col + 1; row < n; row++) {
+      if (Math.abs(M[row][col]) > Math.abs(M[maxRow][col])) maxRow = row;
+    }
+    [M[col], M[maxRow]] = [M[maxRow], M[col]];
+
+    const pivot = M[col][col];
+    if (Math.abs(pivot) < 1e-12) continue;
+
+    for (let row = 0; row < n; row++) {
+      if (row === col) continue;
+      const f = M[row][col] / pivot;
+      for (let j = col; j <= n; j++) M[row][j] -= f * M[col][j];
+    }
+  }
+
+  return M.map((row, i) => row[n] / row[i]);
+}
+
+// Returns 9-element row-major 3×3 matrix H such that H*srcPts[i] = dstPts[i]
+function computeHomography(srcPts, dstPts) {
+  const A = [], b = [];
+  for (let i = 0; i < 4; i++) {
+    const [x, y] = srcPts[i];
+    const [u, v] = dstPts[i];
+    A.push([-x, -y, -1, 0, 0, 0, x * u, y * u]); b.push(-u);
+    A.push([0, 0, 0, -x, -y, -1, x * v, y * v]); b.push(-v);
+  }
+  const h = gaussSolve(A, b);
+  return [...h, 1];
+}
+
+function invertMat3(m) {
+  const [a, b, c, d, e, f, g, h, k] = m;
+  const det = a * (e * k - f * h) - b * (d * k - f * g) + c * (d * h - e * g);
+  if (Math.abs(det) < 1e-14) return null;
+  const inv = 1 / det;
+  return [
+    (e * k - f * h) * inv, (c * h - b * k) * inv, (b * f - c * e) * inv,
+    (f * g - d * k) * inv, (a * k - c * g) * inv, (c * d - a * f) * inv,
+    (d * h - e * g) * inv, (b * g - a * h) * inv, (a * e - b * d) * inv,
+  ];
+}
+
+// ============================================================
+// Geometry helpers
+// ============================================================
+
+function cross2d(ax, ay, bx, by) { return ax * by - ay * bx; }
+
+function pointInQuad(px, py, pts) {
+  const signs = [];
+  for (let i = 0; i < 4; i++) {
+    const [ax, ay] = pts[i];
+    const [bx, by] = pts[(i + 1) % 4];
+    signs.push(cross2d(bx - ax, by - ay, px - ax, py - ay));
+  }
+  return signs.every(s => s >= 0) || signs.every(s => s <= 0);
+}
+
+// ============================================================
+// DOM refs
+// ============================================================
+
+const uploadArea  = document.getElementById('upload-area');
+const fileInput   = document.getElementById('file-input');
+const container   = document.getElementById('canvas-container');
+const glCanvas    = document.getElementById('gl-canvas');
+const overlayCanvas = document.getElementById('overlay-canvas');
+const interactCanvas = document.getElementById('interact-canvas');
+const controls    = document.getElementById('controls');
+const depthSlider = document.getElementById('depth-slider');
+const depthVal    = document.getElementById('depth-val');
+const legend      = document.getElementById('legend');
+
+// ============================================================
+// App state
+// ============================================================
+
+let imgEl = null;
+let canvasW = 0, canvasH = 0;
+let quadPts = [];   // 4 × [x, y] in canvas pixel coords, order: TL TR BR BL
+let depth = 8;
+let quadMode = 'rect'; // 'rect' | 'square' | 'free'
+
+let dragType = null;         // 'corner' | 'translate' | null
+let dragCornerIdx = -1;
+let dragStartMouse = [0, 0];
+let dragStartPts = [];
+
+let hoverCornerIdx = -1;
+let hoverInside = false;
+
+// ============================================================
+// WebGL
+// ============================================================
+
+let gl, glProgram, glTexture;
+let uInvHLoc, uQ0Loc, uQ1Loc, uQ2Loc, uQ3Loc, uDepthLoc;
+
+const VS = `
+attribute vec2 aPos;
+varying vec2 vUV;
+void main() {
+  // vUV: (0,0) top-left, (1,1) bottom-right
+  vUV = vec2(aPos.x * 0.5 + 0.5, 0.5 - aPos.y * 0.5);
+  gl_Position = vec4(aPos, 0.0, 1.0);
+}`;
+
+const FS = `
+precision highp float;
+uniform sampler2D uTex;
+uniform mat3 uInvH;
+uniform vec2 uQ0, uQ1, uQ2, uQ3;
+uniform int uDepth;
+varying vec2 vUV;
+
+float cross2(vec2 a, vec2 b) { return a.x * b.y - a.y * b.x; }
+
+bool inQuad(vec2 p) {
+  float d0 = cross2(uQ1 - uQ0, p - uQ0);
+  float d1 = cross2(uQ2 - uQ1, p - uQ1);
+  float d2 = cross2(uQ3 - uQ2, p - uQ2);
+  float d3 = cross2(uQ0 - uQ3, p - uQ3);
+  bool allP = d0 >= 0.0 && d1 >= 0.0 && d2 >= 0.0 && d3 >= 0.0;
+  bool allN = d0 <= 0.0 && d1 <= 0.0 && d2 <= 0.0 && d3 <= 0.0;
+  return allP || allN;
+}
+
+vec2 applyH(vec2 p) {
+  vec3 h = uInvH * vec3(p, 1.0);
+  return h.xy / h.z;
+}
+
+void main() {
+  vec2 uv = vUV;
+  for (int i = 0; i < 20; i++) {
+    if (i >= uDepth) break;
+    if (!inQuad(uv)) break;
+    uv = applyH(uv);
+  }
+  vec2 texUV = clamp(uv, 0.0, 1.0);
+  gl_FragColor = texture2D(uTex, texUV);
+}`;
+
+function initGL() {
+  gl = glCanvas.getContext('webgl', { preserveDrawingBuffer: true }) || glCanvas.getContext('experimental-webgl', { preserveDrawingBuffer: true });
+  if (!gl) { alert('WebGL not supported in this browser.'); return false; }
+
+  function makeShader(type, src) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+      console.error(gl.getShaderInfoLog(s));
+    return s;
+  }
+
+  glProgram = gl.createProgram();
+  gl.attachShader(glProgram, makeShader(gl.VERTEX_SHADER, VS));
+  gl.attachShader(glProgram, makeShader(gl.FRAGMENT_SHADER, FS));
+  gl.linkProgram(glProgram);
+  if (!gl.getProgramParameter(glProgram, gl.LINK_STATUS))
+    console.error(gl.getProgramInfoLog(glProgram));
+
+  gl.useProgram(glProgram);
+
+  const verts = new Float32Array([-1,-1, 1,-1, -1,1, -1,1, 1,-1, 1,1]);
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STATIC_DRAW);
+
+  const aPosLoc = gl.getAttribLocation(glProgram, 'aPos');
+  gl.enableVertexAttribArray(aPosLoc);
+  gl.vertexAttribPointer(aPosLoc, 2, gl.FLOAT, false, 0, 0);
+
+  uInvHLoc  = gl.getUniformLocation(glProgram, 'uInvH');
+  uQ0Loc    = gl.getUniformLocation(glProgram, 'uQ0');
+  uQ1Loc    = gl.getUniformLocation(glProgram, 'uQ1');
+  uQ2Loc    = gl.getUniformLocation(glProgram, 'uQ2');
+  uQ3Loc    = gl.getUniformLocation(glProgram, 'uQ3');
+  uDepthLoc = gl.getUniformLocation(glProgram, 'uDepth');
+  gl.uniform1i(gl.getUniformLocation(glProgram, 'uTex'), 0);
+
+  glTexture = gl.createTexture();
+  return true;
+}
+
+function uploadTexture(img) {
+  gl.bindTexture(gl.TEXTURE_2D, glTexture);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+}
+
+function render() {
+  if (!gl || !imgEl || quadPts.length < 4) return;
+
+  gl.viewport(0, 0, canvasW, canvasH);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+
+  // Quad in UV space (y=0 top, matching canvas coords)
+  const uvPts = quadPts.map(([px, py]) => [px / canvasW, py / canvasH]);
+
+  // H: image corners (0,0),(1,0),(1,1),(0,1) → quad corners
+  const imgCorners = [[0,0],[1,0],[1,1],[0,1]];
+  const H = computeHomography(imgCorners, uvPts);
+  const Hinv = invertMat3(H);
+
+  if (Hinv) {
+    // Pass as column-major mat3 for WebGL
+    const [a,b,c,d,e,f,g,h,k] = Hinv;
+    gl.uniformMatrix3fv(uInvHLoc, false, [a,d,g, b,e,h, c,f,k]);
+    gl.uniform1i(uDepthLoc, depth);
+  } else {
+    gl.uniform1i(uDepthLoc, 0);
+  }
+
+  gl.uniform2f(uQ0Loc, uvPts[0][0], uvPts[0][1]);
+  gl.uniform2f(uQ1Loc, uvPts[1][0], uvPts[1][1]);
+  gl.uniform2f(uQ2Loc, uvPts[2][0], uvPts[2][1]);
+  gl.uniform2f(uQ3Loc, uvPts[3][0], uvPts[3][1]);
+
+  gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+  drawOverlay();
+}
+
+// ============================================================
+// Overlay: quad + handles + image-corner indicators
+// ============================================================
+
+function drawOverlay() {
+  const ctx = overlayCanvas.getContext('2d');
+  ctx.clearRect(0, 0, canvasW, canvasH);
+  if (quadPts.length < 4) return;
+
+  // Quad fill
+  ctx.beginPath();
+  ctx.moveTo(quadPts[0][0], quadPts[0][1]);
+  for (let i = 1; i < 4; i++) ctx.lineTo(quadPts[i][0], quadPts[i][1]);
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(255,255,255,0.04)';
+  ctx.fill();
+
+  // Colored edges
+  ctx.lineWidth = 2;
+  for (let i = 0; i < 4; i++) {
+    const j = (i + 1) % 4;
+    const g = ctx.createLinearGradient(
+      quadPts[i][0], quadPts[i][1], quadPts[j][0], quadPts[j][1]);
+    g.addColorStop(0, CORNER_COLORS[i]);
+    g.addColorStop(1, CORNER_COLORS[j]);
+    ctx.beginPath();
+    ctx.moveTo(quadPts[i][0], quadPts[i][1]);
+    ctx.lineTo(quadPts[j][0], quadPts[j][1]);
+    ctx.strokeStyle = g;
+    ctx.stroke();
+  }
+
+  // Corner handles
+  for (let i = 0; i < 4; i++) {
+    const [x, y] = quadPts[i];
+    const hovered = hoverCornerIdx === i;
+    const r = hovered ? CORNER_RADIUS * 1.3 : CORNER_RADIUS;
+
+    // Outer ring
+    ctx.beginPath();
+    ctx.arc(x, y, r + 2, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(0,0,0,0.4)';
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fillStyle = CORNER_COLORS[i];
+    ctx.fill();
+    ctx.strokeStyle = 'white';
+    ctx.lineWidth = hovered ? 2.5 : 1.5;
+    ctx.stroke();
+  }
+
+  // Image-corner indicators: small colored triangles at the canvas corners
+  // matching the corresponding quad corner color
+  const triSize = 18;
+  const cornerDefs = [
+    // [canvasX, canvasY, cornerIndex, dirX, dirY]
+    [0, 0, 0, 1, 1],
+    [canvasW, 0, 1, -1, 1],
+    [canvasW, canvasH, 2, -1, -1],
+    [0, canvasH, 3, 1, -1],
+  ];
+
+  for (const [cx, cy, ci, dx, dy] of cornerDefs) {
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(cx + dx * triSize, cy);
+    ctx.lineTo(cx, cy + dy * triSize);
+    ctx.closePath();
+    ctx.fillStyle = CORNER_COLORS[ci];
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+}
+
+// ============================================================
+// Mode constraints
+// ============================================================
+
+// quadPts order: 0=TL, 1=TR, 2=BR, 3=BL
+// Opposite pairs: 0↔2, 1↔3
+const OPPOSITE = [2, 3, 0, 1];
+// Adjacent sharing X: TL↔BL (0,3), TR↔BR (1,2)
+// Adjacent sharing Y: TL↔TR (0,1), BL↔BR (3,2)
+
+function applyCornerConstraint(idx, mx, my) {
+  const pts = quadPts.map(p => [...p]);
+  if (quadMode === 'free') {
+    pts[idx] = [mx, my];
+    return pts;
+  }
+
+  const opp = OPPOSITE[idx];
+  const [ox, oy] = pts[opp];
+
+  if (quadMode === 'rect') {
+    pts[idx] = [mx, my];
+    // Propagate to the two adjacent corners
+    // idx shares Y with one adjacent, X with the other
+    // Corner layout:  0(TL) 1(TR)
+    //                 3(BL) 2(BR)
+    // idx=0: shares Y with 1, shares X with 3
+    // idx=1: shares Y with 0, shares X with 2
+    // idx=2: shares Y with 3, shares X with 1
+    // idx=3: shares Y with 2, shares X with 0
+    const shareY = [1, 0, 3, 2];
+    const shareX = [3, 2, 1, 0];
+    pts[shareY[idx]][1] = my;
+    pts[shareX[idx]][0] = mx;
+    return pts;
+  }
+
+  if (quadMode === 'square') {
+    const dx = mx - ox;
+    const dy = my - oy;
+    const size = Math.max(Math.abs(dx), Math.abs(dy));
+    const sx = Math.sign(dx) || 1;
+    const sy = Math.sign(dy) || 1;
+    // Place this corner at (ox + sx*size, oy + sy*size)
+    const nx = ox + sx * size;
+    const ny = oy + sy * size;
+    pts[idx] = [nx, ny];
+    const shareY = [1, 0, 3, 2];
+    const shareX = [3, 2, 1, 0];
+    pts[shareY[idx]][1] = ny;
+    pts[shareX[idx]][0] = nx;
+    // Opposite corner doesn't move; re-sync its adjacent
+    pts[shareY[opp]][1] = oy;
+    pts[shareX[opp]][0] = ox;
+    return pts;
+  }
+
+  return pts;
+}
+
+// Snap current quad to rectangle (bounding box)
+function snapToRect() {
+  const xs = quadPts.map(p => p[0]);
+  const ys = quadPts.map(p => p[1]);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs);
+  const y0 = Math.min(...ys), y1 = Math.max(...ys);
+  quadPts = [[x0,y0],[x1,y0],[x1,y1],[x0,y1]];
+}
+
+// Snap current quad to square (centered on bounding box)
+function snapToSquare() {
+  snapToRect();
+  const cx = (quadPts[0][0] + quadPts[2][0]) / 2;
+  const cy = (quadPts[0][1] + quadPts[2][1]) / 2;
+  const half = Math.min(quadPts[2][0] - quadPts[0][0], quadPts[2][1] - quadPts[0][1]) / 2;
+  quadPts = [
+    [cx-half, cy-half], [cx+half, cy-half],
+    [cx+half, cy+half], [cx-half, cy+half],
+  ];
+}
+
+// ============================================================
+// Mouse interaction
+// ============================================================
+
+function canvasPos(e) {
+  const r = interactCanvas.getBoundingClientRect();
+  return [e.clientX - r.left, e.clientY - r.top];
+}
+
+function distToCorner(px, py, i) {
+  return Math.hypot(px - quadPts[i][0], py - quadPts[i][1]);
+}
+
+function nearestCorner(px, py) {
+  for (let i = 0; i < 4; i++) {
+    if (distToCorner(px, py, i) <= HIT_RADIUS) return i;
+  }
+  return -1;
+}
+
+interactCanvas.addEventListener('mousemove', (e) => {
+  const [mx, my] = canvasPos(e);
+
+  if (dragType === 'corner') {
+    quadPts = applyCornerConstraint(dragCornerIdx, mx, my);
+    render();
+    return;
+  }
+
+  if (dragType === 'translate') {
+    const dx = mx - dragStartMouse[0];
+    const dy = my - dragStartMouse[1];
+    quadPts = dragStartPts.map(([x, y]) => [x + dx, y + dy]);
+    render();
+    return;
+  }
+
+  const ci = nearestCorner(mx, my);
+  const inside = ci < 0 && pointInQuad(mx, my, quadPts);
+
+  if (ci !== hoverCornerIdx || inside !== hoverInside) {
+    hoverCornerIdx = ci;
+    hoverInside = inside;
+    drawOverlay();
+  }
+
+  interactCanvas.style.cursor = ci >= 0 ? 'grab' : inside ? 'move' : 'default';
+});
+
+interactCanvas.addEventListener('mousedown', (e) => {
+  const [mx, my] = canvasPos(e);
+  const ci = nearestCorner(mx, my);
+
+  if (ci >= 0) {
+    dragType = 'corner';
+    dragCornerIdx = ci;
+    interactCanvas.style.cursor = 'grabbing';
+  } else if (pointInQuad(mx, my, quadPts)) {
+    dragType = 'translate';
+    dragStartMouse = [mx, my];
+    dragStartPts = quadPts.map(p => [...p]);
+    interactCanvas.style.cursor = 'grabbing';
+  }
+
+  e.preventDefault();
+});
+
+window.addEventListener('mouseup', () => {
+  dragType = null;
+  dragCornerIdx = -1;
+});
+
+interactCanvas.addEventListener('mouseleave', () => {
+  if (dragType) return;
+  hoverCornerIdx = -1;
+  hoverInside = false;
+  drawOverlay();
+});
+
+// Touch support
+function touchPos(e) {
+  const r = interactCanvas.getBoundingClientRect();
+  const t = e.touches[0] || e.changedTouches[0];
+  return [t.clientX - r.left, t.clientY - r.top];
+}
+
+interactCanvas.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  const [tx, ty] = touchPos(e);
+  const ci = nearestCorner(tx, ty);
+  if (ci >= 0) {
+    dragType = 'corner';
+    dragCornerIdx = ci;
+  } else if (pointInQuad(tx, ty, quadPts)) {
+    dragType = 'translate';
+    dragStartMouse = [tx, ty];
+    dragStartPts = quadPts.map(p => [...p]);
+  }
+}, { passive: false });
+
+interactCanvas.addEventListener('touchmove', (e) => {
+  e.preventDefault();
+  const [tx, ty] = touchPos(e);
+  if (dragType === 'corner') {
+    quadPts = applyCornerConstraint(dragCornerIdx, tx, ty);
+    render();
+  } else if (dragType === 'translate') {
+    const dx = tx - dragStartMouse[0];
+    const dy = ty - dragStartMouse[1];
+    quadPts = dragStartPts.map(([x, y]) => [x + dx, y + dy]);
+    render();
+  }
+}, { passive: false });
+
+interactCanvas.addEventListener('touchend', (e) => {
+  e.preventDefault();
+  dragType = null;
+  dragCornerIdx = -1;
+}, { passive: false });
+
+// ============================================================
+// Image loading
+// ============================================================
+
+function resetQuad() {
+  const m = Math.min(canvasW, canvasH) * 0.28;
+  quadPts = [
+    [m, m],
+    [canvasW - m, m],
+    [canvasW - m, canvasH - m],
+    [m, canvasH - m],
+  ];
+}
+
+function setupCanvases(w, h) {
+  canvasW = w; canvasH = h;
+  for (const c of [glCanvas, overlayCanvas, interactCanvas]) {
+    c.width = w; c.height = h;
+  }
+}
+
+function loadImageFile(file) {
+  const url = URL.createObjectURL(file);
+  const img = new Image();
+  img.onload = () => {
+    const maxDim = Math.min(window.innerWidth - 40, window.innerHeight - 180, 900);
+    const scale = Math.min(1, maxDim / img.width, maxDim / img.height);
+    setupCanvases(Math.round(img.width * scale), Math.round(img.height * scale));
+
+    uploadArea.style.display = 'none';
+    container.style.display = 'block';
+    controls.style.display = 'flex';
+    legend.style.display = 'flex';
+
+    if (!gl) {
+      if (!initGL()) return;
+    }
+    imgEl = img;
+    uploadTexture(img);
+    resetQuad();
+    render();
+    URL.revokeObjectURL(url);
+  };
+  img.onerror = () => { alert('Could not load image.'); URL.revokeObjectURL(url); };
+  img.src = url;
+}
+
+fileInput.addEventListener('change', (e) => {
+  if (e.target.files[0]) loadImageFile(e.target.files[0]);
+  fileInput.value = '';
+});
+
+uploadArea.addEventListener('dragover', (e) => {
+  e.preventDefault();
+  uploadArea.classList.add('drag-over');
+});
+uploadArea.addEventListener('dragleave', () => uploadArea.classList.remove('drag-over'));
+uploadArea.addEventListener('drop', (e) => {
+  e.preventDefault();
+  uploadArea.classList.remove('drag-over');
+  const f = e.dataTransfer.files[0];
+  if (f && f.type.startsWith('image/')) loadImageFile(f);
+});
+
+// Also allow dropping on the canvas area
+document.addEventListener('dragover', (e) => e.preventDefault());
+document.addEventListener('drop', (e) => {
+  e.preventDefault();
+  const f = e.dataTransfer.files[0];
+  if (f && f.type.startsWith('image/')) loadImageFile(f);
+});
+
+depthSlider.addEventListener('input', () => {
+  depth = parseInt(depthSlider.value);
+  depthVal.textContent = depth;
+  render();
+});
+
+document.getElementById('reset-quad-btn').addEventListener('click', () => {
+  resetQuad();
+  render();
+});
+
+document.getElementById('change-img-btn').addEventListener('click', () => {
+  fileInput.click();
+});
+
+document.getElementById('save-btn').addEventListener('click', () => {
+  render(); // ensure buffer is current
+  const url = glCanvas.toDataURL('image/png');
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'droste.png';
+  a.click();
+});
+
+// Mode selector
+const modeBtns = document.querySelectorAll('.mode-btn');
+// Set initial active state
+modeBtns.forEach(btn => {
+  btn.classList.toggle('active', btn.dataset.mode === quadMode);
+});
+modeBtns.forEach(btn => {
+  btn.addEventListener('click', () => {
+    const newMode = btn.dataset.mode;
+    if (newMode === quadMode) return;
+    quadMode = newMode;
+    modeBtns.forEach(b => b.classList.toggle('active', b.dataset.mode === quadMode));
+    // Snap existing quad to the new constraint
+    if (quadPts.length === 4) {
+      if (quadMode === 'rect') snapToRect();
+      else if (quadMode === 'square') snapToSquare();
+      render();
+    }
+  });
+});
+</script>
+</body>
+</html>
